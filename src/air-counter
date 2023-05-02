@@ -1,0 +1,55 @@
+#!/usr/bin/perl
+#***************************************************************************
+#                      air-counter - counting data buffer
+#                      -------------------------------
+#    copyright         : (c)2003-2010 by Steve Gibson
+#    email             : steve@stevegibson.com
+#***************************************************************************
+
+#***************************************************************************
+#                                                                          *
+#    This program is free software; you can redistribute it and/or modify  *
+#    it under the terms of the GNU General Public License as published by  *
+#    the Free Software Foundation; either version 2 of the License, or     *
+#    (at your option) any later version.                                   *
+#                                                                          *
+#***************************************************************************
+
+my ($bytes_read, $count, $megs, $gigs);
+my ($start_time, $stop_time, $mid_time, $total_time, $mb_sec);
+my ($buffer, $buffer_size);
+
+if ($ARGV[0]) {
+	$buffer_size = $ARGV[0];
+	print STDERR "buffer_size=$buffer_size\n";
+} else {
+	$buffer_size = 10485760; # 10MB
+}
+$count = 0;
+$megs = 0;
+$gigs = 0;
+
+$start_time = time();
+
+while($bytes_read = read(STDIN,$buffer,$buffer_size)) {
+	$count = $count + $bytes_read;
+	$megs = $count / 1024 / 1024;
+	$gigs = $megs / 1024;
+	$mid_time = time();
+	$total_time = $mid_time - $start_time;
+        if ($total_time == 0) {
+                $total_time = 1;
+        }
+	$mb_sec = $megs / $total_time;
+	printf (STDERR "Progress: %.2fMB (%.2fGB)\tAvg. Throughput: %.2fMB/sec\n",$megs,$gigs,$mb_sec);
+	print STDOUT $buffer;
+}
+
+$stop_time = time();
+$total_time = $stop_time - $start_time;
+if ($total_time == 0) {
+        $total_time = 1;
+}
+$mb_sec = $megs / $total_time;
+
+printf (STDERR "Finished: %.2fMB (%.2fGB)\tAvg. Throughput: %.2fMB/sec\n",$megs,$gigs,$mb_sec);

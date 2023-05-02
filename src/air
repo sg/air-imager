@@ -1,0 +1,2597 @@
+#!/usr/bin/perl 
+#***************************************************************************
+#                      AIR - Automated Image & Restore 
+#                      -------------------------------
+#    copyright         : (c)2001-2010 by Steve Gibson
+#    email             : steve@stevegibson.com
+#
+#    Modded by Nanni Bassetti - digitfor@gmail.com
+#    January 2010 
+#***************************************************************************
+
+#***************************************************************************
+#                                                                          *
+#    This program is free software; you can redistribute it and/or modify  *
+#    it under the terms of the GNU General Public License as published by  *
+#    the Free Software Foundation; either version 2 of the License, or     *
+#    (at your option) any later version.                                   *
+#                                                                          *
+#***************************************************************************
+
+use Tk;
+use Tk::FBox;
+use Tk::Dialog;
+use POSIX qw(:sys_wait_h);
+use IO::Handle;
+use strict;
+require Tk::LabEntry;
+
+my $air_version = "2.0.0";
+my $version_date = "2010-02-17";
+
+#**********************************
+# Default settings
+#**********************************
+my $bitmap_dir="/usr/local/share/air/bitmaps";
+my $air_log_dir = "/usr/local/share/air/logs";
+my $start_dir=`pwd`;
+chomp $start_dir;
+my $air_log = "$air_log_dir/air.image.log";
+my $air_buffer_data= "$air_log_dir/air.buffer.data";
+my $air_fifo = "/usr/local/share/air/air-fifo";
+my $counting_pipe_cmd="air-counter";
+my $counting_pipe_out="2>> $air_buffer_data";
+my $command_cancelled = 0;
+my $source_is_tape=0;
+my $dest_is_tape=0;
+my $source_is_net=0;
+my $dest_is_net=0;
+my $info = "Enter values and click 'Start' to begin";
+my $source_lblk = 32768;
+my $dest_lblk = 32768;
+#my $auto_set_hardware_blocksize = 0;
+my $comp_type = "None";
+my $verify = "Yes";
+my $seek_blocks=0;
+my $skip_blocks=0;
+my $ddtype="dc3dd";		
+my $nctype="nc";
+my $kernel_ver=`uname -r`;
+my $split = 0;
+my $nctype = 0; # 0=netcat (nc), 1=cryptcat
+my $split_size = 2047;
+my $crypt_key = "phi_1.618";
+my $conv_opts = "noerror,sync";
+my $iflag_opts = "direct";
+my $hs = "";
+#**********************************
+# Other Globals
+#**********************************
+my $dd_in;
+my $dd_out;
+my $source_port;
+my $dest_port;
+my $dest_ip;
+my $source;
+my $dest;
+my $hash_type;
+my $hash_type2 = "None";
+my $hash_prog;
+my $counting_pipe;
+my $count;
+my $img_cmd_front;
+my $img_cmd_mid;
+my $img_cmd_end;
+my $img_cmd_full;
+my $running_verify;
+my $device_name;
+my $home_dir;
+my $source_entry;
+my $dest_entry;
+my $ltr;
+my $dev_exists;
+my $tnum;
+my $helper_app;
+my $hash;
+my $source_data;
+my $dest_data;
+my $pid;
+my $pid2;
+my $no_nc;
+my $no_cryptcat;
+my $no_dc3dd;
+my $mt_arg1;
+my $mt_arg2;
+my $orig_hash;
+my $verify_hash;
+my $source_block_size;
+my $dest_block_size;
+my $source_cust_blocksize;
+my $use_source_cust_blocksize;
+my $dest_cust_blocksize;
+my $use_dest_cust_blocksize;
+my $source_custom_block_entry;
+my $dest_custom_block_entry;
+my $tape_drive_empty;
+
+#**********************************
+# Read in settings from rc file
+#**********************************
+my $user_id = `whoami`;
+chomp $user_id;
+if ($user_id eq "root") {
+	$home_dir = "/$user_id/";
+} else {
+	$home_dir = "/home/$user_id/";
+}
+my $rc_file = $home_dir . ".airrc";
+
+if (-e $rc_file) {
+	open(RC, "$rc_file") or warn "$rc_file exists, but couldn't be opened: $!\n";
+	print "$rc_file opened for read.\n";
+	while (<RC>) {
+		chomp;
+		if (/source_lblk:(.+?)$/) {
+			$source_lblk = $1;
+			next;
+		}
+		if (/dest_lblk:(.+?)$/) {
+			$dest_lblk = $1;
+			next;
+		}
+		if (/source:(.+?)$/) {
+			$source = $1;
+			next;
+		}
+		if (/dest:(.+?)$/) {
+			$dest = $1;
+			next;
+		}
+		if (/comp_type:(.+?)$/) {
+			$comp_type = $1;
+			next;
+		}
+		if (/hash_type:(.+?)$/) {
+			$hash_type = $1;
+			next;
+		}
+		if (/hash_type2:(.+?)$/) {
+			$hash_type2 = $1;
+			next;
+		}
+		if (/bitmap_dir:(.+?)$/) {
+			$bitmap_dir = $1;
+			next;
+		}
+		if (/air_log_dir:(.+?)$/) {
+			$air_log_dir = $1;
+			next;
+		}
+		if (/verify:(.+?)$/) {
+			$verify = $1;
+			next;
+		}
+		if (/ddtype:(.+?)$/) {
+			$ddtype = $1;
+			next;
+		}
+		if (/nctype:(.+?)$/) {
+			$nctype = $1;
+			next;
+		}
+		if (/split_size:(.+?)$/) {
+			$split_size = $1;
+			next;
+		}
+		if (/crypt_key:(.+?)$/) {
+			$crypt_key = $1;
+			next;
+		}
+		if (/conv_opts:(.+?)$/) {
+			$conv_opts = $1;
+			next;
+		}
+		if (/iflag_opts:(.+?)$/) {
+			$iflag_opts = $1;
+			next;
+		}
+	}
+	close(RC);
+} else {
+	print "$rc_file not found...using defaults\n";
+	system "touch $rc_file";
+}
+
+#**********************************
+# Try to load scsi module
+#**********************************
+#print "Attempting to load scsi module...";
+#system "modprobe scsi_hostadapter";
+#my $ret_val = $? >> 8;
+#if ($ret_val > 0) {
+#	warn "Couldn't load scsi module. Return value of 'modprobe scsi_hostadapter' = $ret_val.\n";
+#} else {
+#	print "SCSI module successfully loaded.\n";
+#}
+
+#**********************************
+# Make sure directories exist
+#**********************************
+unless (-d $bitmap_dir) {
+	print "directory $bitmap_dir doesn't exist...creating it\n";
+	system "mkdir -p $bitmap_dir";
+}
+unless (-d $air_log_dir) {
+	print "directory $air_log_dir doesn't exist...creating it\n";
+	system "mkdir -p $air_log_dir";
+}
+
+
+
+#*****************************************************************************
+# Build the GUI
+#*****************************************************************************
+
+#**********************************
+# Create Main Windows
+#**********************************
+my $mw = MainWindow->new;
+$mw->title("AIR $air_version - Automated Image & Restore - $version_date");
+
+#**********************************
+# mw Frames
+#**********************************
+my $topframe = $mw->Frame(
+	-relief => 'groove', 
+	-borderwidth => 3,
+	)->pack(
+	-side => 'top', 
+	-fill => 'x',
+	);
+my $botframe = $mw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'bottom', 
+	-fill => 'x',
+	);
+my $midbotframe = $mw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'bottom', 
+	-fill => 'x',
+	);
+my $optionsparentframe = $mw->Frame(
+	-borderwidth =>10,
+	)->pack(
+	-side=> 'bottom', 
+	-fill => 'x',
+	);
+my $midleftframe = $mw->Frame(
+	-borderwidth => 10,
+	)->pack(-side => 'left',
+	);
+my $midmidframe = $mw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'left',
+	);
+my $midrightframe = $mw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'left',
+	);
+
+
+#**********************************
+# Top Frame (Menu) stuff
+# File Menu
+#**********************************
+my $menu_File = $topframe->Menubutton(
+	-text => "File", 
+	-tearoff => 0,
+	-menuitems => [[ 'command' => "Start", 
+				-command => \&dd_start, 
+				-state => 'normal'],
+			[ 'command' => "Stop", 
+				-command => \&dd_stop, 
+				-state => 'disabled'],
+			"-",
+			[ 'command' => "Clear Session Log...", 
+				-command => \&clear_session_log], 
+			[ 'command' => "Save Session Log...", 
+				-command => \&save_session_log],
+			"-",
+			[ 'command' => "Exit", 
+				-command => \&exit_air]]
+	)->pack(
+	-side => 'left',
+	);
+
+#**********************************
+# Help Menu
+#**********************************
+my $menu_help = $topframe->Menubutton(
+	-text => "Help", 
+	-tearoff => 0, 
+	-direction => 'left',
+	-menuitems => [[ 'command' => "Usage...", 
+			-state => 'disabled'],
+			"-",
+			[ 'command' => "About AIR...", 
+			-command => \&about_air]]
+	)->pack(
+	-side => 'right',
+	);
+
+
+#**********************************
+# Mid Left Frame stuff
+#**********************************
+$midleftframe->Label(
+	-text => "Source device/file: ",
+	)->grid(
+	-row => 1, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+my $source_entry = $midleftframe->Entry(
+	-textvariable => \$source,
+	)->grid(
+	-row => 2, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+
+my $browse_image = $mw->Photo(-file => "$bitmap_dir/browse.gif");
+
+my $source_button = $midleftframe->Button(
+	-image => $browse_image,
+	-command => \&browse_source_file,
+	)->grid(
+	-row => 2, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+$midleftframe->Label(
+	-text => "Source Block Size: ",
+	)->grid(
+	-row => 4, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+my $source_lblk_entry = $midleftframe->Optionmenu(
+	-options => [512,1024,2048,4096,8192,10240,16384,32768,65536,131072], 
+	-disabledforeground => 'grey',
+	-textvariable => \$source_lblk,
+	)->grid(
+	-row => 4, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+my $source_custom_block_entry = $midleftframe->Entry(
+        -textvariable => \$source_cust_blocksize,
+	-width => '10',
+	-state => 'disabled',
+        )->grid(
+        -row => 5,
+        -column => 1,
+        -sticky => 'w',
+        );
+my $source_custom_block_btn = $midleftframe->Checkbutton(
+        -onvalue => '1',
+        -offvalue => '0',
+        -variable => \$use_source_cust_blocksize,
+        -text => 'Custom Block Size:',
+	-command => sub {
+			if ($use_source_cust_blocksize) {
+				$source_lblk_entry->configure(-state => 'disabled');
+                                $source_custom_block_entry->configure(-state => 'normal');
+			} else {
+				$source_lblk_entry->configure(-state => 'normal');
+				$source_custom_block_entry->configure(-state => 'disabled');
+			}
+			},
+        )->grid(
+        -row => 5,
+        -column => 0,
+        -sticky => 'w',
+        );
+				
+#**********************************
+# Mid mid frame
+# This is basically just a spacer 
+# between source & dest
+#**********************************
+$midmidframe->Button(
+	-width=> 5, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->pack(
+	);
+
+
+#**********************************
+# Mid Right Frame stuff
+#**********************************
+$midrightframe->Label(
+	-text => "Destination device/file: ",
+	)->grid(
+	-row => 1, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+my $dest_entry = $midrightframe->Entry(
+	-textvariable => \$dest,
+	)->grid(
+	-row => 2, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+
+my $dest_button = $midrightframe->Button(
+	-image => $browse_image,
+	-command => \&browse_dest_file,
+	)->grid(
+	-row => 2, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+$midrightframe->Label(
+	-text => "Dest. Block Size: ",
+	)->grid(
+	-row => 4, 
+	-column => 0, 
+	-sticky => 'w',
+	);
+my $dest_lblk_entry = $midrightframe->Optionmenu(
+	-options => [512,1024,2048,4096,8192,10240,16384,32768,65536,131072], 
+	-textvariable => \$dest_lblk,
+	-disabledforeground => 'grey',
+	)->grid(
+	-row => 4, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+my $dest_custom_block_entry = $midrightframe->Entry(
+        -textvariable => \$dest_cust_blocksize,
+	-width => '10',
+	-state => 'disabled',
+        )->grid(
+        -row => 5,
+        -column => 1,
+        -sticky => 'w',
+        );
+my $dest_custom_block_btn = $midrightframe->Checkbutton(
+        -onvalue => '1',
+        -offvalue => '0',
+        -variable => \$use_dest_cust_blocksize,
+        -text => 'Custom Block Size:',
+        -command => sub {
+                        if ($use_dest_cust_blocksize) {
+                                $dest_lblk_entry->configure(-state => 'disabled');
+				$dest_custom_block_entry->configure(-state => 'normal');
+                        } else {
+                                $dest_lblk_entry->configure(-state => 'normal');
+				$dest_custom_block_entry->configure(-state => 'disabled');
+                        }
+                        },
+        )->grid(
+        -row => 5,
+        -column => 0,
+        -sticky => 'w',
+        );
+
+#**********************************
+# Options Frame stuff
+#**********************************
+$optionsparentframe->Label(
+	-text => "Options",
+	)->pack(
+	-side => 'top',
+	);
+my $optionsframe = $optionsparentframe->Frame(
+	-relief => 'groove', 
+	-borderwidth => 3,
+	)->pack(
+	-side => 'top', 
+	-fill => 'x',
+	);
+#
+# COMPRESSION
+$optionsframe->Label(
+	-text => "Compression:",
+	)->grid(
+	-row => 1,
+	-column => 1, 
+	-sticky => 'w',
+	);
+$optionsframe->Optionmenu(
+	-options => ['None','-','gzip','bzip2','-','gunzip','bunzip2'],
+	-textvariable => \$comp_type,
+	)->grid(
+	-row => 2, 
+	-column => 1,
+	-sticky => 'w',
+	);
+#spacer
+$optionsframe->Button(
+	-width=>1, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->grid(
+	-row=> 1,
+	-column => 2,
+	);
+#
+# HASH
+$optionsframe->Label(
+	-text => "Hash 1:",
+	)->grid(
+	-row => 1,
+	-column => 3, 
+	-sticky => 'w',
+	);
+$optionsframe->Label(
+	-text => "Hash 2:",
+	)->grid(
+	-row => 1,
+	-column => 4, 
+	-sticky => 'w',
+	);
+$optionsframe->Optionmenu(
+	-options => ['md5','sha1','sha256','sha384','sha512','None'], 
+	-textvariable => \$hash_type,
+	)->grid(
+	-row => 2,
+	-column => 3, 
+	-sticky => 'w',
+	);
+
+$optionsframe->Optionmenu(
+	-options => ['md5','sha1','sha256','sha384','sha512','None'], 
+	-textvariable => \$hash_type2,
+	)->grid(
+	-row => 2,
+	-column => 4, 
+	-sticky => 'w',
+	);
+
+
+#
+# VERIFY
+$optionsframe->Label(
+	-text => "Verify:",
+	)->grid(
+	-row => 1,
+	-column => 5, 
+	-sticky => 'w',
+	);
+$optionsframe->Optionmenu(
+	-options => ['Yes','No'], 
+	-textvariable => \$verify,
+	)->grid(
+	-row => 2,
+	-column => 5, 
+	-sticky => 'w',
+	);
+#spacer
+$optionsframe->Button(
+	-width=>1, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->grid(
+	-row=> 4,
+	-column => 6,
+	);
+#
+# DC3DD
+my $ddtype_btn = $optionsframe->Checkbutton(
+	-onvalue => 'dc3dd', 
+	-offvalue => 'dd', 
+	-variable => \$ddtype, 
+	-text => 'Use DC3DD',
+	)->grid(
+	-row => 1, 
+	-column => 7, 
+	-sticky => 'w',
+	);
+#
+# SPLIT IMAGE
+my $splitframe = $optionsframe->Frame(
+	-relief => 'flat',
+	-borderwidth => 1,
+	)->grid(
+	-row => 3,
+	-column => 7,
+	-sticky => 'w',
+	);
+my $split_lbl = $splitframe->Label(
+	-text => "Size:",
+	-disabledforeground => 'grey',
+	-state => 'disabled',
+	)->grid(
+	-row => 1, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+my $split_size_entry = $splitframe->Entry(
+	-textvariable => \$split_size, 
+	-disabledforeground => 'grey',
+	-width => 5,
+	-state => 'disabled',
+	)->grid(
+	-row => 1, 
+	-column => 2,
+	-sticky => 'w',
+	);
+my $split_lbl2 = $splitframe->Label(
+	-text => "MBytes",
+	-disabledforeground => 'grey',
+	-state => 'disabled',
+	)->grid(
+	-row => 1,
+	-column => 3,
+	-sticky => 'w',
+	);
+
+my $split_btn = $optionsframe->Checkbutton(
+        -onvalue => '1',
+        -offvalue => '0',
+        -variable => \$split,
+        -text => 'Split image',
+	-command => sub {
+		if ($split) {
+                	$split_size_entry->configure(-state => 'normal');
+			$split_lbl->configure(-state => 'normal');
+			$split_lbl2->configure(-state => 'normal');
+                } else {
+                        $split_size_entry->configure(-state => 'disabled');
+			$split_lbl->configure(-state => 'disabled');
+			$split_lbl2->configure(-state => 'disabled');
+                }
+        },
+
+        )->grid(
+        -row => 2,
+        -column => 7,
+        -sticky => 'w',
+        );
+#
+# CRYPTCAT
+my $cryptcatframe = $optionsframe->Frame(
+	-relief => 'flat',
+	-borderwidth => 1,
+	)->grid(
+	-row => 5,
+	-column => 7,
+	-sticky => 'w',
+	);
+my $crypt_lbl = $cryptcatframe->Label(
+	-text => "Key:",
+	-disabledforeground => 'grey',
+	-state => 'disabled',
+	)->grid(
+	-row => 1, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+my $crypt_key_entry = $cryptcatframe->Entry(
+	-textvariable => \$crypt_key, 
+	-disabledforeground => 'grey',
+	-width => 12,
+	-state => 'disabled',
+	)->grid(
+	-row => 1, 
+	-column => 2,
+	-sticky => 'w',
+	);
+my $nctype_btn = $optionsframe->Checkbutton(
+	-onvalue => '1',
+	-offvalue => '0',
+	-variable => \$nctype,
+	-text => 'Cryptcat',
+	-command => sub {
+		if (!$nctype) {
+                	$crypt_key_entry->configure(-state => 'disabled');
+			$crypt_lbl->configure(-state => 'disabled');
+                } else {
+                	$crypt_key_entry->configure(-state => 'normal');
+			$crypt_lbl->configure(-state => 'normal');
+                }
+        },
+	)->grid(
+	-row => 4,
+	-column => 7,
+	-sticky => 'w',
+	);
+#
+# COUNT
+$optionsframe->Label(
+	-text => "DD Count: ",
+	)->grid(
+	-row => 3, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+
+my $count_entry = $optionsframe->Entry(
+	-textvariable => \$count, 
+	-width => 12,
+	)->grid(
+	-row => 4, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+#spacer
+$optionsframe->Button(
+	-width=>1, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->grid(
+	-row=> 3,
+	-column => 2,
+	);
+#
+# SKIP BLOCKS
+$optionsframe->Label(
+	-text => "Skip (Input): ",
+	)->grid(
+	-row => 3, 
+	-column => 3, 
+	-sticky => 'w',
+	);
+my $skip_entry = $optionsframe->Entry(
+	-textvariable => \$skip_blocks, 
+	-width => 12,
+	)->grid(
+	-row => 4, 
+	-column => 3, 
+
+	-sticky => 'w',
+	);
+#spacer
+$optionsframe->Button(
+	-width=>1, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->grid(
+	-row=> 3,
+	-column => 4,
+	);
+#
+# SEEK BLOCKS
+$optionsframe->Label(
+	-text => "Seek (Output): ",
+	)->grid(
+	-row => 3, 
+	-column => 5, 
+	-sticky => 'w',
+	);
+my $seek_entry = $optionsframe->Entry(
+	-textvariable => \$seek_blocks, 
+	-width => 12,
+	)->grid(
+	-row => 4, 
+	-column => 5, 
+	-sticky => 'w',
+	);
+#spacer
+$optionsframe->Button(
+	-width=>1, 
+	-relief=> 'flat', 
+	-state => 'disabled',
+	)->grid(
+	-row=> 3,
+	-column => 6,
+	);
+# CONV_OPTS
+$optionsframe->Label(
+	-text => "Conv: ",
+	)->grid(
+	-row => 5, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+
+my $conv_entry = $optionsframe->Entry(
+	-textvariable => \$conv_opts, 
+	-width => 12,
+	)->grid(
+	-row => 6, 
+	-column => 1, 
+	-sticky => 'w',
+	);
+# iflag
+$optionsframe->Label(
+	-text => "iflag: ",
+	)->grid(
+	-row => 5, 
+	-column => 3, 
+	-sticky => 'w',
+	);
+
+my $iflag = $optionsframe->Optionmenu(
+	-options => ['direct','sync','noatime','append','dsync'], 
+	-textvariable => \$iflag_opts,
+	)->grid(
+	-row => 6,
+	-column => 3, 
+	-sticky => 'w',
+	);
+
+#my $auto_set_hardware_block_btn = $optionsframe->Checkbutton(
+#	-onvalue => '1',
+#	-offvalue => '0',
+#	-variable => \$auto_set_hardware_blocksize,
+#	-text => 'Auto-Set Tape Block Size',
+#	)->grid(
+#	-row => 5,
+#	-column => 7,
+#	-sticky => 'w',
+#	);
+
+
+#**********************************
+#Mid Bottom Frame
+#**********************************
+
+$midbotframe->Label(
+	-text => "Connected devices",
+	)->pack(
+	-side => 'top',
+	);
+my $device_frame = $midbotframe->Frame(
+	-relief => 'groove', 
+	-borderwidth => 3,
+	)->pack(
+	-side => 'top', 
+	-fill => 'x',
+	);
+
+my $device_label_frame = $midbotframe->Frame(
+	-relief => 'flat', 
+	-borderwidth => 1,
+	)->pack(
+	-side => 'top', 
+	-fill => 'x',
+	);
+
+#**********************************
+# IDE Drive buttons 
+#**********************************
+my @ide_drive_ltr = ('a','b','c','d','e','f','g','h');
+# create pointers to the images
+my @hd_image = "";
+my @cd_image = "";
+my $media;
+my $inum = 0;
+
+foreach $ltr (@ide_drive_ltr) {
+	$hd_image[$inum] = $mw->Photo(-file => "$bitmap_dir/hd_hd$ltr.gif");
+	$inum++;
+}
+
+$inum = 0;
+foreach $ltr (@ide_drive_ltr) {
+	$cd_image[$inum] = $mw->Photo(-file => "$bitmap_dir/cd_hd$ltr.gif");
+	$inum++;
+}
+$inum = 0;
+IDE_DISK: foreach $ltr (@ide_drive_ltr) {
+	$device_name = "hd$ltr";
+	print "Checking for ide device /dev/$device_name...\n";
+	if (-e "/proc/ide/$device_name") {
+		$media = `cat /proc/ide/$device_name/media`;
+		print "media for $device_name is: $media\n";
+		chomp $media;
+		if ($media =~ /cdrom/) {
+			# use cdrom gif
+			$device_frame->Button(-image => $cd_image[$inum], -command => [\&device_action,$device_name])->pack(-side => 'left');
+		} else {
+			# use hard disk gif
+			$device_frame->Button(-image => $hd_image[$inum], -command => [\&device_action,$device_name])->pack(-side => 'left');
+		}
+	print "found /dev/$device_name\n";
+        system "hdparm -d1 /dev/$device_name";
+	}
+	$inum++;
+}
+
+
+
+#**********************************
+#SCSI device buttons
+#**********************************
+my @scsi_drive_ltr = ('a','b','c','d','e','f');
+# create pointers to the images
+my @scsi_image = "";
+my $inum = 0;
+foreach $ltr (@scsi_drive_ltr) {
+	$scsi_image[$inum] = $mw->Photo(-file => "$bitmap_dir/hd_sd$ltr.gif");
+	$inum++;
+}
+
+$inum = 0;
+SCSI_DISK: foreach $ltr (@scsi_drive_ltr) {
+	undef($dev_exists);
+	$device_name = "sd$ltr";
+	print "Checking for scsi disk /dev/$device_name...\n";
+	$dev_exists = open(SCSI_TMP, "/dev/$device_name");
+	if (! defined($dev_exists)) {
+		#print "dev_exists = $dev_exists\n";
+		$inum++;
+		next SCSI_DISK;
+	}
+	#print "dev_exists = $dev_exists\n";
+	close(SCSI_TMP);
+	$device_frame->Button(-image => $scsi_image[$inum], -command => [\&device_action,$device_name])->pack(-side => 'left');
+	print "found /dev/$device_name\n";
+	$inum++;
+}
+
+#**********************************
+# SCSI CD-ROM buttons
+#**********************************
+my @scd_num = ('0','1');
+my $scdnum;
+# create more pointers to the images...
+my @scd_image = "";
+$inum = 0;
+foreach $scdnum (@scd_num) {
+	$scd_image[$inum] = $mw->Photo(-file => "$bitmap_dir/scd$scdnum.gif");
+	$inum++;
+}
+
+$inum = 0;
+SCSI_CD: foreach $scdnum (@scd_num) {
+	$dev_exists = 0;
+	$device_name = "scd$scdnum";
+	print "Checking for scsi cd-rom /dev/$device_name...\n";
+	$dev_exists = open(SCSI_TMP, "/dev/$device_name");
+	if (! defined($dev_exists)) {
+		#print "dev_exists = $dev_exists\n";
+		$inum++;
+		next SCSI_CD;
+	}
+	#print "dev_exists = $dev_exists\n";
+	close(SCSI_TMP);
+	$device_frame->Button(-image => $scd_image[$inum], -command => [\&device_action,$device_name])->pack(-side => 'left');
+	print "found /dev/$device_name\n";
+	$inum++;
+}
+
+#**********************************
+# SCSI Tape buttons
+#**********************************
+my @tape_num = ('0','1','2','3','4');
+# create more pointers to the images...
+my @tape_image = "";
+$inum = 0;
+#$auto_set_hardware_block_btn->configure(-state => 'disabled');
+
+foreach $tnum (@tape_num) {
+	$tape_image[$inum] = $mw->Photo(-file => "$bitmap_dir/nst$tnum.gif");
+	$inum++;
+}
+
+$inum = 0;
+SCSI_TAPE: foreach $tnum (@tape_num) {
+	$device_name = "nst$tnum";
+	print "Checking for scsi tape /dev/$device_name...\n";
+	system "mt -f /dev/$device_name status";
+	my $ret_val = $? >> 8;
+	if ($ret_val == 1) {
+		$inum++;
+		next SCSI_TAPE;
+	}
+	$device_frame->Button(-image => $tape_image[$inum], -command => [\&device_action,$device_name])->pack(-side => 'left');
+	print "found /dev/$device_name\n";
+	### Enable Auto-Set Tape Device Block Size checkbox
+	#$auto_set_hardware_block_btn->configure(-state => 'normal');
+	#$auto_set_hardware_blocksize = 1;
+	
+	$inum++;
+}
+
+#**********************************
+# Special Device Buttons
+#**********************************
+my $dev_zero_image = $mw->Photo(
+	-file => "$bitmap_dir/zero.gif",
+	);
+my $dev_name = "zero";
+$device_frame->Button(
+	-image => $dev_zero_image, 
+	-command => [\&device_action, $dev_name],
+	)->pack(
+	-side => 'left',
+	);
+
+
+my $dev_null_image = $mw->Photo(
+	-file => "$bitmap_dir/null.gif",
+	);
+$dev_name = "null";
+$device_frame->Button(
+	-image => $dev_null_image, 
+	-command => [\&device_action, $dev_name],
+	)->pack(
+	-side => 'left',
+	);
+
+my $net_image = $mw->Photo(
+	-file => "$bitmap_dir/net.gif",
+	);
+$dev_name = "net";
+$device_frame->Button(
+	-image => $net_image,
+	-command => [\&device_action, $dev_name],
+	)->pack(
+	-side => 'left',
+	);
+
+
+#**********************************
+# Bottom Frame
+#
+# Command Buttons
+#**********************************
+my $command_frame = $botframe->Frame(
+	-relief => 'groove', 
+	-borderwidth => 3,
+	)->pack(
+	-side => 'top', 
+	-fill => 'x',
+	);
+my $start_btn = $command_frame->Button(
+	-text => "Start", 
+	-disabledforeground => 'grey', 
+	-state => 'normal', 
+	-command => \&dd_start,
+	) ->pack(
+	-side => 'left',
+	);
+my $stop_btn = $command_frame->Button(
+	-text => "Stop", 
+	-disabledforeground => 'grey', 
+	-state => 'disabled', 
+	-command => \&dd_stop,
+	)->pack(
+	-side => 'left',
+	);
+my $exit_btn = $command_frame->Button(
+	-text => "Exit", 
+	-command => \&exit_air,
+	)->pack(
+	-side => 'left',
+	);
+my $showlog_btn = $command_frame->Button(
+	-text => "Show Status Window...", 
+	-command => \&show_log,
+	)->pack(
+	-side => 'right',
+	);
+
+$botframe->Label(
+	-textvariable => \$info,
+	)->pack(
+	-side => 'bottom', 
+	-fill => 'x',
+	);
+
+#**********************************
+# Status Window Toplevel 
+#**********************************
+my $lw = $mw->Toplevel();
+$lw->title("AIR Session Status");
+
+my $lw_frame = $lw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'top',
+	-fill => 'x',
+);
+my $lw_frame2 = $lw->Frame(
+	-borderwidth => 10,
+	)->pack(
+	-side => 'bottom',
+	-fill => 'x',
+);
+$lw_frame->Label(
+	-text => "Session Log",
+	)->pack(
+	-side => 'top',
+);
+my $output_win = $lw_frame->Scrolled(
+	"Text", 
+	-scrollbars => 'e', 
+	-width => 80, 
+	-height => 10,
+	)->pack(
+	-side => 'top',
+);
+$lw_frame->Label(
+	-text => "Bitstream Data",
+	)->pack(
+	-side => 'top',
+);
+my $status_win = $lw_frame->Scrolled(
+	"Text", 
+	-scrollbars => 'e', 
+	-width => 80, 
+	-height => 5,
+	)->pack(
+	-side => 'top',
+);
+my $comment_btn = $lw_frame2->Button(
+	-text => "Add Comment to Log...", 
+	-command => \&add_comment,
+	)->pack(
+	-side => 'left',
+);
+my $clear_log_btn = $lw_frame2->Button(
+	-text => "Clear...",
+	-command => \&clear_session_log,
+	)->pack(
+	-side => 'left',
+);
+my $save_log_btn = $lw_frame2->Button(
+	-text => "Save...",
+	-command => \&save_session_log,
+	)->pack(
+	-side => 'left',
+);
+my $close_btn = $lw_frame2->Button(
+	-text => "Close",
+	-command => sub { $lw->withdraw},
+	)->pack(
+	-side => 'left',
+);
+
+$lw->withdraw;	
+
+\&init_files();
+
+#**********************************
+# Check for required helper apps
+#**********************************
+print "\nChecking for helper apps...\n";
+my @helper_apps = ('dd','mt','sfdisk','md5sum','split','sha1sum','gzip','gunzip','bzip2','bunzip2','air-counter','tailer','tee');
+
+foreach $helper_app (@helper_apps) {
+	system "which $helper_app";
+	my $ret_val = $? >> 8;
+	if ($ret_val == 1) {
+		&helper_app_dialog();
+	}
+}
+
+print "\Checking for dc3dd...\n";
+system "which dc3dd";
+$no_dc3dd = $? >> 8;
+
+if ($no_dc3dd) {
+	$ddtype = 'dd';
+	$ddtype_btn->configure(-state => 'disabled');	
+}
+
+print "\Checking for netcat and/or cryptcat...\n";
+system "which nc";
+$no_nc = $? >> 8;
+system "which cryptcat";
+$no_cryptcat = $? >> 8;
+
+if (($no_nc == 1) && ($no_cryptcat == 1)) {
+	$nctype = 0; # 0=netcat, 1=cryptcat
+	$nctype_btn->configure(-state => 'disabled');
+	&no_network_dialog();
+}
+if (($no_nc == 1) && ($no_cryptcat != 1)) {
+	$nctype = 1;
+	$nctype_btn->configure(-state => 'disabled');
+	&only_cryptcat_dialog();
+}
+if (($no_nc != 1) && ($no_cryptcat == 1)) {
+	$nctype = 0;
+	$nctype_btn->configure(-state => 'disabled');
+	&no_cryptcat_dialog();
+}
+	
+clear_session_log();
+
+MainLoop;
+
+
+
+#*****************************************************************************
+# Subroutines
+#*****************************************************************************
+
+
+#*****************************************************************************
+# Setup Initial Files
+#*****************************************************************************
+sub init_files {
+
+	# Set up temp files
+
+	unless (-e $air_buffer_data) {
+		print "creating $air_buffer_data\n";
+		system "touch $air_buffer_data";
+	}
+	
+	unless (-e $air_log) {
+		print "creating $air_log\n";
+		system "touch $air_log";
+	}
+	
+	open(ACDW, ">> $air_buffer_data") or die "Error opening $air_buffer_data for writing: $?";
+	open(ACD, "tailer $air_buffer_data |") or die "Error opening $air_buffer_data for tail: $?";
+	open(ALOGW, ">> $air_log") or die "Error opening $air_log for writing: $?";
+	open(ALOG, "tailer $air_log |") or die "Error opening $air_log for tail: $?";
+	
+	# Set up fileevent handler
+	$mw->fileevent('ACD', 'readable', [\&insert_acd]);
+	$mw->fileevent('ALOG', 'readable', [\&insert_alog]);
+	
+	# Enable autoflushing of output
+	ACDW->autoflush(1);
+	ALOGW->autoflush(1);
+}
+
+#*****************************************************************************
+sub insert_acd {
+	my $current_line;
+	if ($current_line = <ACD>) {
+		if (Tk::Exists($lw)) {
+			$status_win->insert('end', $current_line);
+			$status_win->yview('moveto', 100);
+		}
+	} else {
+		$mw->fileevent('ACD', 'readable', "");
+	}
+}
+
+#*****************************************************************************
+sub insert_alog {
+	my $current_line;
+	if ($current_line = <ALOG>) {
+		if (Tk::Exists($lw)) {
+			$output_win->insert('end', $current_line);
+			$output_win->yview('moveto', 100);
+		}
+	} else {
+		$mw->fileevent('ALOG', 'readable', "");
+	}
+}
+
+#*****************************************************************************
+sub browse_source_file {
+	my $fs = $mw->FBox(-initialdir => $start_dir, -title => 'Source File/Device', -type => 'open');
+	my $tmp_source = $fs->Show;
+	if ($tmp_source ne "") {
+		$source = $tmp_source;
+	}
+}
+
+#*****************************************************************************
+sub browse_dest_file {
+	my $fs = $mw->FBox(-initialdir => $start_dir, -title => 'Destination File/Device', -type => 'save');
+	my $tmp_dest = $fs->Show;
+	if ($tmp_dest ne "") {
+		$dest = $tmp_dest;
+	}
+	
+	#my $fs = $mw->getSaveFile(-title=>'Destination');
+	#my $tmp_source = $fs->Show();
+	#$source = $tmp_source;
+}
+
+#*****************************************************************************
+# Clear Previous Session Log
+# 
+# 
+#*****************************************************************************
+sub clear_session_log {
+	my $clear_dlg = $mw->Dialog(-title => "Log cleaning",
+			  -text => "Do you want to delete previous log file?",
+			  -default_button => 'OK',
+			  -buttons => [qw/OK Cancel/],
+			  -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+	my $dlgans = $clear_dlg->Show;
+	if ($dlgans =~ /OK/) {
+		system "rm -f $air_log";
+		system "rm -f $air_buffer_data";
+		system "kill `cat /tmp/tailer.*`";
+		system "rm -f /tmp/tailer.*";
+		$mw->fileevent('ACD', 'readable', "");
+		$mw->fileevent('ALOG', 'readable', "");
+		close(ACDW);
+		close(ACD);
+		close(ALOG);
+		close(ALOGW);
+		$output_win->delete('1.0','end');
+		$status_win->delete('1.0','end');
+		\&init_files();
+	}
+}
+			
+#*****************************************************************************
+# Save Session Log
+#*****************************************************************************
+sub save_session_log {
+	my $fs = $mw->FBox(-initialdir => $start_dir, -title => 'Save Session Log...', -type => 'save');
+	my $save_file = $fs->Show;
+	if ($save_file eq "") {
+		return;
+	} else {
+		system "cp -f $air_log $save_file";
+	}
+	print "session log saved to: $save_file\n";
+	my $save_file = $mw->Dialog(-title => "Log file saved", -text =>"\nsession log saved to: $save_file\n",
+                                -buttons => ['Ok'], -width => '40',
+                                -font => '-*-Arial-Medium-R-Normal--*-140-*-*-*-*-*-*');
+        $save_file->Show;
+}
+
+#*****************************************************************************
+# Helper Application not found 
+#*****************************************************************************
+sub helper_app_dialog {
+        my $helper_app_dlg = $mw->Dialog(-title => "Helper Application Not Found", -text =>
+                                "The helper application '$helper_app' could not be found.\n\nEither $helper_app is not installed, or it is not located in your command PATH.\n\nSince it is likely AIR will fail to function properly if this application is not available, it is strongly suggested that you rectify this condition.",
+                                -buttons => ['Ok'], -width => '60',
+                                -font => '-*-Arial-Medium-R-Normal--*-140-*-*-*-*-*-*');
+        $helper_app_dlg->Show;
+}
+
+#*****************************************************************************
+# Netcat & Cryptcat not found 
+#*****************************************************************************
+sub no_network_dialog {
+        my $no_network_dlg = $mw->Dialog(-title => "Netcat/Cryptcat Not Found", -text =>
+                                "Neither netcat nor cryptcat could be found.\n\nEither they are not installed, or they are not located in your command PATH.\n\nUntil you install one of these programs or fix any PATH issues, you will not be able to image over the network.  If you do not need to send data over the network, then you can safely ignore this message.",
+                                -buttons => ['Ok'], -width => '60',
+                                -font => '-*-Arial-Medium-R-Normal--*-140-*-*-*-*-*-*');
+        $no_network_dlg->Show;
+}
+
+#*****************************************************************************
+# Cryptcat not found 
+#*****************************************************************************
+sub no_cryptcat_dialog {
+        my $no_cryptcat_dlg = $mw->Dialog(-title => "Cryptcat Not Found", -text =>
+                                "Cryptcat could not be found.  This means you will not be able to encrypt any data you may send over the network.\n\nEither cryptcat is not installed, or it is not located in your command PATH.\n\nUntil you install cryptcat or fix any PATH issues, you will not be able to encrypt data sent over the network. If you do not need to encrypt network data, then you can safely ignore this message.",
+                                -buttons => ['Ok'], -width => '60',
+                                -font => '-*-Arial-Medium-R-Normal--*-140-*-*-*-*-*-*');
+        $no_cryptcat_dlg->Show;
+}
+
+#*****************************************************************************
+# Only Cryptcat found 
+#*****************************************************************************
+sub only_cryptcat_dialog {
+        my $only_cryptcat_dlg = $mw->Dialog(-title => "Only Cryptcat", -text =>
+                                "Netcat could not be found, but cryptcat appears to be installed.  This means you will only be able to transfer data over the network to or from another system running cryptcat.  If you do not need to send data over the network, then you can safely ignore this message.",
+                                -buttons => ['Ok'], -width => '60',
+                                -font => '-*-Arial-Medium-R-Normal--*-140-*-*-*-*-*-*');
+        $only_cryptcat_dlg->Show;
+}
+
+#*****************************************************************************
+# About AIR
+#*****************************************************************************
+sub about_air {
+	my $about_dlg = $mw->Dialog(-title => "About AIR...", -text =>
+				"Automated Image & Restore,\nv$air_version\n$version_date\n\nOriginal by Steve Gibson\n<steve\@stevegibson.com>\nModded by Nanni Bassetti\n<digitfor\@gmail.com>\n", 
+				-buttons => ['Ok'], -width => '40',
+				-font => '-*-Arial-Medium-R-Normal--*-120-*-*-*-*-*-*');
+	$about_dlg->Show;
+}
+
+
+#*****************************************************************************
+# Session Status
+#*****************************************************************************
+sub show_log {
+	if (! Tk::Exists($lw)) {
+		$lw = $mw->Toplevel();
+		$lw->title("AIR Session Status");
+		$lw_frame = $lw->Frame(
+			-borderwidth => 10,
+			)->pack(
+			-side => 'top',
+			-fill => 'x',
+		);
+		$lw_frame2 = $lw->Frame(
+			-borderwidth => 10,
+			)->pack(
+			-side => 'bottom',
+			-fill => 'x',
+		);
+		$lw_frame->Label(
+			-text => "Session Log",
+			)->pack(
+			-side => 'top',
+		);
+		$output_win = $lw_frame->Scrolled(
+			"Text", 
+			-scrollbars => 'e', 
+			-width => 80, 
+			-height => 10,
+			)->pack(
+			-side => 'top',
+		);
+		$lw_frame->Label(
+			-text => "Bitstream Data",
+			)->pack(
+			-side => 'top',
+		);
+		$status_win = $lw_frame->Scrolled(
+			"Text", 
+			-scrollbars => 'e', 
+			-width => 80, 
+			-height => 5,
+			)->pack(
+			-side => 'top',
+		);
+		my $comment_btn = $lw_frame2->Button(
+			-text => "Add Comment to Log...", 
+			-command => \&add_comment,
+			)->pack(
+			-side => 'left',
+		);
+		my $close_btn = $lw_frame2->Button(
+			-text => "Close",
+			-command => sub { $lw->withdraw},
+			)->pack(
+			-side => 'left',
+		);
+		
+	} else {
+		$lw->deiconify();
+		$lw->raise();
+	} 
+}
+
+#*****************************************************************************
+# Add Comment to Session Log
+#*****************************************************************************
+sub add_comment {
+	my $dbox = $mw->DialogBox(-title => "Add Comment to Log", -buttons => ['OK','Cancel']);
+	my $dbox_text = $dbox->add('Scrolled','Text', -scrollbars => 'e', -height=>'10',-width=>"70")->pack;
+	# DialogBox binds the Return key to invoke the OK button.  I need to "unbind"
+	# that behavior so carriage returns can be entered into the text box (otherwise
+	# the dialog box closes as soon as the return key is hit).  So I re-bind the
+	# return key to a function that does nothing... I haven't found out how to unbind
+	# a key or set it back to its default behavior.
+	$dbox->bind('<Return>'=> \&no_op);
+	my $dbox_result = $dbox->Show;
+	if ($dbox_result =~ "OK") {
+		my $dbox_comment = $dbox_text->get('1.0','end');
+		chomp $dbox_comment;
+		print ALOGW "\n*** Comment ***\n";
+		print ALOGW "$dbox_comment\n";
+		print ALOGW "*** End Comment ***\n";
+	}
+	#print "$dbox_result\n";
+	#print "comment = $dbox_comment\n";
+}	
+
+
+sub no_op {
+# do nothing
+}
+
+
+#*****************************************************************************
+# DD START (the big daddy)
+#*****************************************************************************
+sub dd_start {
+	system "rm -f /tmp/*hash*.log";
+	$source_data = $source_entry -> get();
+	$dest_data = $dest_entry -> get();
+
+	if ($use_source_cust_blocksize) {
+		$source_block_size = $source_custom_block_entry->get();
+		if ($source_block_size < 1) {
+			my $custblkdlg = $mw->Dialog(-title => "Invalid Custom Block Size",
+				-text => "You have entered an invalid custom block size for the data Source.  Fix it and try again.",
+				-buttons => ["Ok"],
+				-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+			my $dlgans = $custblkdlg->Show;	
+			return;
+		}
+	} else {
+		$source_block_size = $source_lblk;
+	}
+
+	if ($use_dest_cust_blocksize) {
+		$dest_block_size = $dest_custom_block_entry->get();
+	} else {
+		$dest_block_size = $dest_lblk;
+	}
+	
+	if ($split) {
+		$split_size = $split_size_entry->get();
+	}
+
+	if (($split) && ($comp_type ne "None")) {
+		my $split_dlg = $mw->Dialog(-title => "Cannot Compress and Split",
+                          -text => "AIR does not currently support both compression and splitting of images.  Press Proceed to have AIR continue with compression enabled and splitting disabled or press Cancel to terminate the process.",
+                          -default_button => 'Cancel',
+                          -buttons => [qw/Proceed Cancel/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+                my $dlgans = $split_dlg->Show;
+		if ($dlgans =~ /Cancel/) {
+			return;
+		} else {
+			$split = 0;
+			$split_size_entry->configure(-state => 'disabled');
+                        $split_lbl->configure(-state => 'disabled');
+                        $split_lbl2->configure(-state => 'disabled');
+			#$split_btn->configure(-state => 'disabled');
+		}
+	}
+	print "ddtype = $ddtype\n";
+
+	#**********************************
+	# If Verify is selected, make sure Hash isn't "None"
+	#**********************************
+	if (($verify eq "Yes") && ($hash_type eq "None")) {
+		$hash_type = "md5";
+	}
+
+	#**********************************
+	# Data Wipe Warning
+	#**********************************
+	if (($source_data =~ /^\/dev\/zero/) || ($source_data =~ /^\/dev\/urandom/) || ($source_data =~ /^\/dev\/random/) || ($source_data =~ /^pattern=/)) {
+        	my $wipe_dlg = $mw->Dialog(-title => "Wipe Data?",
+                          -text => "Are you sure you want to WIPE ALL DATA on $dest_data?",
+                          -default_button => 'Cancel',
+                          -buttons => [qw/Proceed Cancel/],
+			  -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+        	my $dlgans = $wipe_dlg->Show;
+        	if ($dlgans =~ /Cancel/) {
+			return;
+        	}
+	}
+	#*******************************************************
+        # check if dd and sha256 (or higher)  are both selected
+        #*******************************************************
+        if (($ddtype eq "dd") && ($hash_type =~ /sha256|sha384|sha512/)) {
+                my $dd_sha_dlg = $mw->Dialog(-title => "Invalid Hash Selection",
+                          -text => "SHA256, SHA384, or SHA512 hashing are not currently implemented with DD.  You need to use DC3DD to use those hash algorithms.",
+                          -default_button => 'Ok',
+                          -buttons => [qw/Ok/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');                my $dlgans = $dd_sha_dlg->Show;
+                if ($dlgans =~ /Ok/) {
+                        return;
+                }
+        }
+
+	#**********************************
+	# Check for copy over network
+	#**********************************
+	if ($source_data =~ /^port:(.+?)$/i) {
+		$source_port = $1;
+		$source_is_net = 1;
+	}
+	if ($dest_data =~ /^ip:(.+?) port:(.+?)$/i) {
+		$dest_ip = $1;
+		$dest_port = $2;
+		$dest_is_net = 1;
+		my $net_dlg = $mw->Dialog(-title => "Remote Receiver Ready?",
+                          -text => "The remote receiver at IP $dest_ip:$dest_port must already be listening before you can proceed.  If the remote receiver is running AIR, ensure that the Source is set to \"port:$dest_port\" and that you have clicked the Start button.\n\nAre you ready to proceed with sending the data?",
+                          -default_button => 'Cancel',
+                          -buttons => [qw/Yes Cancel/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+                my $dlgans = $net_dlg->Show;
+                if ($dlgans eq "Cancel") {
+                        return;
+                }
+        }	
+	if ($dest_is_net == 1) {
+		if ($verify eq "Yes") {
+			my $net_vrfy_dlg = $mw->Dialog(-title => "Network Verify",
+                          -text => "You cannot use the \"Verify\" option when the destination is over the network.  It is suggested to run a MD5 checksum on this end and use the \"Verify\" option on the destination side.  Do you wish to use MD5 verification, no verification, or cancel the operation?",
+                         -default_button => 'MD5',
+                          -buttons => [qw/MD5 None Cancel/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+                	my $dlgans = $net_vrfy_dlg->Show;
+                	if ($dlgans =~ /Cancel/) {
+                	        return;
+                	}
+			if ($dlgans =~ /MD5/) {
+				$hash_type = "md5";
+				$hash_prog = "md5sum";
+				$verify = "No";
+			}
+			if ($dlgans =~ /None/) {
+				$hash_type = "None";
+				$hash_prog = "";
+				$verify = "No";
+			}
+				
+		}	
+	}
+
+	#**********************************
+	# Set button states & get other options
+	#**********************************
+	$start_btn->configure(-state => 'disabled');
+	$stop_btn->configure(-state => 'normal');
+	$menu_File->entryconfigure("Start", -state => 'disabled');
+	$menu_File->entryconfigure("Stop", -state => 'normal');
+	
+	$info = "Working...  SOURCE = $source   DEST = $dest";
+	#$counting_pipe_cmd = $counting_pipe_entry -> get();
+	$command_cancelled = 0;
+	
+		
+	#**********************************
+	# Tape Drive Detection
+	#**********************************
+	if ($source_data =~ /^\/dev\/(nst|st)/) { 
+		$source_is_tape=1;
+		print "source_is_tape\n";
+		#if ($auto_set_hardware_blocksize) {
+		#	print ALOGW "Setting source tape device blocksize to $source_block_size.";
+		#	system "mt -f $source_data setblk $source_block_size >> $air_log 2>&1";
+		#}
+	}
+	if ($dest_data =~ /^\/dev\/(nst|st)/) { 
+		$dest_is_tape=1;
+		print "dest_is_tape\n";
+		#if ($auto_set_hardware_blocksize) {
+		#	print ALOGW "Setting destination tape device blocksize to $dest_block_size.";
+		#	system "mt -f $dest_data setblk $dest_block_size >> $air_log 2>&1";
+		#}
+	}
+	
+	if (($source_is_tape == 1) || ($dest_is_tape == 1)) { \&rewind_tape() }
+	
+	#**********************************
+	# Default command-line build
+	#**********************************
+	if ($ddtype eq "dc3dd") {
+		$dd_in = "dc3dd status=noxfer";
+		$dd_out = "dc3dd status=noxfer";
+	} else {
+		$dd_in = "dd";
+		$dd_out = "dd";
+	}
+	if ($counting_pipe_cmd eq "") {
+		$counting_pipe = "";
+	} else {
+		$counting_pipe = "| $counting_pipe_cmd $counting_pipe_out";
+	}
+
+	if ($seek_blocks eq "") {
+		$seek_blocks = 0;
+	}
+
+	if ($skip_blocks eq "") {
+		$skip_blocks = 0;
+	}
+
+	if ($count ne "") {
+		$img_cmd_front = "$dd_in if=$source_data count=$count skip=$skip_blocks conv=$conv_opts iflag=$iflag_opts ibs=$source_block_size 2>> $air_log $counting_pipe ";
+	} else {
+		$img_cmd_front = "$dd_in if=$source_data skip=$skip_blocks conv=$conv_opts iflag=$iflag_opts ibs=$source_block_size 2>> $air_log $counting_pipe ";
+	}	
+	$img_cmd_mid = "";
+	$img_cmd_end = "| $dd_out of=$dest_data conv=$conv_opts iflag=$iflag_opts seek=$seek_blocks obs=$dest_block_size >> $air_log 2>&1";
+
+	# Split the image
+	if ($split) {
+           $img_cmd_end = "| /usr/local/bin/split -a 3 -d -b $split_size" . "m" . " - $dest_data. >> $air_log 2>&1";
+        } else {
+           $img_cmd_end = "| $dd_out of=$dest_data seek=$seek_blocks obs=$dest_block_size >> $air_log 2>&1";
+        }
+	# Dest is NET
+	if ($dest_is_net == 1) {
+		if ($nctype == 0) {
+			$img_cmd_end = "| nc -w 3 $dest_ip $dest_port";	
+		} else {
+			$img_cmd_end = "| cryptcat -k $crypt_key -w 3 $dest_ip $dest_port";
+		}
+	}
+
+	# if dc3dd and source_data = "pattern=" then replace if= with source_data ("pattern=")
+	if (($ddtype =~ "dc3dd") && ($source_data =~ /^pattern=/)) {
+		$img_cmd_front =~ s/if=//;
+	}
+
+	# Source is NET
+	if ($source_is_net == 1) {
+		if ($nctype == 0) {
+			$img_cmd_front = "nc -l -p $source_port $counting_pipe ";
+		} else {
+			$img_cmd_front = "cryptcat -k $crypt_key -l -p $source_port $counting_pipe ";
+		}
+	}
+
+	#**********************************
+	# Compression 
+	#**********************************
+	if ($comp_type ne "None") {
+		if ($comp_type eq "bzip2") {
+			print "comp_type = $comp_type\n";
+			$img_cmd_mid = "| $comp_type ";
+
+			# if writing to a device or .bz2 is already in the name, don't append the .bz2
+			unless (($dest_data =~ /\/dev\//) || ($dest_data =~ /\.bz2/) || ($dest_is_net == 1)) {
+				$img_cmd_end = "| $dd_out of=$dest_data.bz2 seek=$seek_blocks obs=$dest_block_size >> $air_log 2>&1";
+			}
+				
+		}
+		if ($comp_type eq "gzip") {
+			print "comp_type = $comp_type\n";
+			$img_cmd_mid = "| $comp_type -1"; # -1 means fastest compression
+
+			# if writing to a device or .gz is already in the filename, don't append the .gz
+			unless (($dest_data =~ /\/dev\//) || ($dest_data =~ /\.gz/) || ($dest_is_net == 1)){
+				$img_cmd_end = "| $dd_out of=$dest_data.gz seek=$seek_blocks obs=$dest_block_size >> $air_log 2>&1";
+			}	
+		}
+		if (($comp_type eq "bunzip2") || ($comp_type eq "gunzip")) {
+			print "comp_type = $comp_type\n";
+			$img_cmd_mid = "| $comp_type";
+		}
+	}
+	
+	if (($source_data =~ /\.gz/) && ($comp_type ne "gunzip")) {
+		print "source data looks like its gzipped...\n";
+		my $decompress_dlg = $mw->Dialog(-title => "Decompress Data?",
+                          -text => "Source $source_data appears to be a GZIP compressed file.  Would you like to decompress on-the-fly?",
+                          -default_button => 'Yes',
+                          -buttons => [qw/Yes No/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+                my $dlgans = $decompress_dlg->Show;
+                if ($dlgans =~ /Yes/) {
+			$comp_type = "gunzip";
+			$img_cmd_mid = "| $comp_type";
+		} else {
+			$comp_type = "None";
+		}
+	}
+
+	if (($source_data =~ /\.bz2/) && ($comp_type ne "bunzip2")) {
+                print "source data looks like its bzipped...\n";
+                my $decompress_dlg = $mw->Dialog(-title => "Decompress Data?",
+                          -text => "Source $source_data appears to be a BZIP2 compressed file.  Would you like to decompress on-the-fly?",
+                          -default_button => 'Yes',
+                          -buttons => [qw/Yes No/],
+                          -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+                my $dlgans = $decompress_dlg->Show;
+                if ($dlgans =~ /Yes/) {
+                        $comp_type = "bunzip2";
+                        $img_cmd_mid = "| $comp_type";
+                } else {
+			$comp_type = "None";
+		}
+	}
+	
+	#**********************************
+	# Hash
+	#**********************************
+	if ($hash_type2 ne "None"){
+		$hs = "$hash_type,$hash_type2";
+ 	} else {
+		$hs = "$hash_type";
+	}
+	if (($hash_type ne "None") && ($ddtype eq "dc3dd")) {
+		if (($comp_type eq "gunzip") || ($comp_type eq "bunzip2")) { # do hash calc after decompression
+			if ($dest_is_net == 0) {
+				$img_cmd_end =~ s/dc3dd/dc3dd hash=$hs  hashlog=\/tmp\/hash.log/;
+			} else {
+				$img_cmd_front =~ s/^dc3dd/dc3dd hash=$hs  hashlog=\/tmp\/hash.log/;
+			}
+		} else {			
+			if ($source_is_net == 0) {
+				$img_cmd_front =~ s/^dc3dd/dc3dd hash=$hs  hashlog=\/tmp\/hash.log/;
+			} else {
+				$img_cmd_end =~ s/dc3dd/dc3dd hash=$hs  hashlog=\/tmp\/hash.log/;
+			}
+		}
+	} 
+	if (/hash_type:(.+?)$/) {
+		$hash_type = $1;
+		next;
+	}
+	if (/hash_type2:(.+?)$/) {
+		$hash_type2 = $1;
+		next;
+	}
+	if (($hash_type ne "None") && ($ddtype eq "dd")) {
+		$hash_prog = $hash_type . "sum";
+	        my $cur_date = `date`;
+		chomp $cur_date;
+		# if air_fifo exists, remove it incase it contains stale data
+		if (-e "$air_fifo") {
+			system "rm -f $air_fifo";
+		}
+		# create a new named pipe called "air_fifo"
+		my $cmd_status = system "mkfifo $air_fifo";
+		if ($cmd_status != 0) {
+			warn "mkfifo exited abnormally: $!\n";
+		} else {
+			print "$air_fifo created successfully.\n";
+		}
+
+		if (($comp_type eq "gzip") || ($comp_type eq "bzip2")) { # insert img_cmd_mid compression pipe after the hash 
+			if ($dest_is_net == 0) {
+				$img_cmd_end =~ s/^\| dd/dd if=$air_fifo 2>> $air_log $img_cmd_mid \| dd/;
+			} else {
+				$img_cmd_end = "dd if=$air_fifo 2>> $air_log " . $img_cmd_mid . $img_cmd_end;
+			}
+		} else {
+			if (($comp_type eq "gunzip") || ($comp_type eq "bunzip2")) { # insert decompression before the hash 
+				if ($source_is_net != 1) {
+					$img_cmd_front = $img_cmd_front . $img_cmd_mid;
+				} else {
+					$img_cmd_front =~ s/\| air-counter/$img_cmd_mid \| air-counter/;
+				}
+				if ($dest_is_net != 1) {
+					$img_cmd_end =~ s/^\| dd/dd if=$air_fifo 2>> $air_log \| dd/;
+				} else {
+					$img_cmd_end = "dd if=$air_fifo 2>> $air_log " . $img_cmd_end;
+				}
+			} else {			
+				if ($dest_is_net != 1) {
+					if ($split) {
+						#split command would go here
+					} else {
+						$img_cmd_end =~ s/^\| dd/dd if=$air_fifo 2>> $air_log \| dd/;
+					}
+				} else {
+					$img_cmd_end = "dd if=$air_fifo 2>> $air_log " . $img_cmd_end;
+				}
+			}
+		}
+			
+		$img_cmd_mid = "| tee $air_fifo | $hash_prog > /tmp/hash.log 2>&1";
+
+		#SPLIT during HASH
+		if ($split) {
+			$img_cmd_end = "dd if=$air_fifo 2>> $air_log | /usr/local/bin/split -a 3 -d -b $split_size" . "m" . " - $dest_data.";
+		}
+	}
+		
+	
+
+	if ($dest_is_net == 1) {
+		if ($nctype == 0) {
+			$img_cmd_end =~ s/$ddtype of=$dest_data/| nc $dest_ip $dest_port/;
+		} else {
+			$img_cmd_end =~ s/$ddtype of=$dest_data/| cryptcat -k $crypt_key $dest_ip $dest_port/;
+		}
+	}
+		
+	#**********************************
+	# Get the current date & time
+	#**********************************
+	my $cur_date = `date `;
+	chomp $cur_date;
+
+	#**********************************
+	# Fork and exec commands
+	#**********************************
+	if ($hash_type ne "None") {
+		if ($ddtype eq "dd") {
+			#Fork and exec two seperate commands: one to generate the hash and write to a fifo,
+			# and the other to read from the fifo and write to the dest.
+			print ALOGW "\nStart DD ($hash_type inline): $cur_date\n";
+			print ACDW "\nStart DD ($hash_type inline): $cur_date\n";
+			print ALOGW "\n$hash_type hash will be calculated on $source.\n";
+			print ALOGW "\nCommand-line:\n$img_cmd_front" . "$img_cmd_mid\n";
+			print ALOGW "$img_cmd_end\n";
+			if ($pid = fork) {
+				#parent
+				$SIG{CHLD} = \&reaper;
+			} else {
+				die "cannot fork 1st half of $hash_type dd command: $!" unless defined $pid;
+				#child
+				my $img_cmd_1 = "$img_cmd_front" . "$img_cmd_mid";
+				exec "$img_cmd_1";
+			}
+			if ($pid2 = fork) {
+				#parent
+				$SIG{CHLD} = \&reaper;
+			} else {
+				die "cannot fork 2nd half of $hash_type dd command: $!" unless defined $pid2;
+				#child
+				exec "$img_cmd_end";
+			}
+		} else { 
+			# DC3DD w/ MD5,SHA1,SHA256,SHA384, or SHA512
+			# ddtype = dc3dd.  dc3dd has built-in hashing, so we don't use two
+			# seperate commands to do the dd'ing and the hashing...
+			print ALOGW "\nStart DC3DD ($hash_type $hash_type2): $cur_date\n";
+			print ACDW "\nStart DC3DD ($hash_type $hash_type2): $cur_date\n";
+                        print ALOGW "\nHash will be calculated on $source.\n";
+                        $img_cmd_full = "$img_cmd_front" . "$img_cmd_mid" . "$img_cmd_end";
+                        print ALOGW "\nCommand-line:\n$img_cmd_full\n";
+                        if ($pid = fork) {
+                                #parent
+                                $SIG{CHLD} = \&reaper;
+                        } else {
+                                die "cannot fork dc3dd ($hash_type $hash_type2) command: $!" unless defined $pid;
+                                #child
+                                exec "$img_cmd_full";
+                        }
+		}
+		
+	} else {
+		# Fork and exec the non-md5 image command
+		$img_cmd_full = $img_cmd_front . $img_cmd_mid . $img_cmd_end;
+		print "image command: $img_cmd_full\n";
+		if ($ddtype eq "dd") {
+			print ALOGW "\nStart DD: $cur_date\n";
+			print ACDW "\nStart DD: $cur_date\n";
+		} else {
+			print ALOGW "\nStart DC3DD: $cur_date\n";
+			print ACDW "\nStart DC3DD: $cur_date\n";
+		}
+		print ALOGW "\nCommand-line:\n$img_cmd_full\n";
+		
+		if ($pid = fork) {
+			# parent
+			$SIG{CHLD} = \&reaper;
+		} else {
+			die "cannot fork: $!" unless defined $pid;
+			# child
+			exec "$img_cmd_full" or die "Error executing image command: $!\n";
+		}
+	}
+
+} # end of dd_start sub
+
+
+
+#*****************************************************************************
+# Verify subroutine
+# fork off some dd's with cmp between them...
+#*****************************************************************************
+sub verify {
+	$running_verify = 1;
+	#**********************************
+	# Rewind tape first
+	#**********************************
+	\&rewind_tape();
+	$info = "Verifying... $source_data  ==  $dest_data";
+
+	#**********************************
+	# Get the current date & time
+	#**********************************
+	my $cur_date = `date `;
+	chomp $cur_date;
+	print ALOGW "\nStart VERIFY: $cur_date\n";
+	print ACDW "\nStart VERIFY: $cur_date\n";
+	print ALOGW "\nVerifying...\n";
+
+	if ($hash_type2 ne "None"){
+		$hs = "$hash_type,$hash_type2";
+ 	} else {
+		$hs = "$hash_type";
+}	
+	# extract hash value from dd/md5sum/sha1sum and dc3dd md5/sha1 outputs
+	if ($ddtype eq "dc3dd") {
+		# Get original hash
+		$orig_hash = `cat /tmp/hash.log | grep -i Total`;
+		chomp $orig_hash;
+		$orig_hash =~ s/Total: //;
+	} else {
+		# Get original hash
+		$orig_hash = `cat /tmp/hash.log`;
+		chomp $orig_hash;
+		$orig_hash =~ s/  -//;
+	}
+
+	print "orig_hash = $orig_hash\n";
+
+	# Build command-line
+	if ($dest_is_tape == 1) {
+		if ($ddtype eq "dc3dd") {
+			$img_cmd_full = "dc3dd if=$dest_data conv=$conv_opts iflag=$iflag_opts hash=$hs hashlog=/tmp/verify_hash.log  status=noxfer bs=$dest_block_size $counting_pipe > /dev/null";
+		} else {
+			$img_cmd_full = "dd if=$dest_data conv=$conv_opts iflag=$iflag_opts bs=$dest_block_size $counting_pipe | $hash_prog > /tmp/verify_hash.log";
+		}
+	}
+
+	if ($dest_is_tape == 0) {
+		if ($split) {
+			# Use cat to piece the segments back together and pipe through hashing program
+
+			if ($ddtype eq "dc3dd") {
+
+				$img_cmd_full = "cat $dest_data.* $counting_pipe | dc3dd hash=$hs hashlog=/tmp/verify_hash.log  status=noxfer of=/dev/null";
+			} else {
+                		$img_cmd_full = "cat $dest_data.* $counting_pipe | $hash_prog > /tmp/verify_hash.log";
+			}
+		} else {
+			 if ($ddtype eq "dc3dd") {
+                                $img_cmd_full = "dc3dd if=$dest_data hash=$hs conv=$conv_opts hashlog=/tmp/verify_hash.log status=noxfer $counting_pipe > /dev/null";
+				if ($comp_type ne "None") {
+					if ($comp_type eq "bzip2") {
+						$img_cmd_full =~ s/$dest_data/$dest_data\.bz2 | bunzip2 | dc3dd/;
+					} else {
+						$img_cmd_full =~ s/$dest_data/$dest_data\.gz | gunzip | dc3dd/;
+					}
+				}
+                        } else {
+				$img_cmd_full = "dd if=$dest_data conv=$conv_opts $counting_pipe | $hash_prog > /tmp/verify_hash.log";
+				if ($comp_type ne "None") {
+					if ($comp_type eq "bzip2") {
+						$img_cmd_full =~ s/$dest_data/$dest_data\.bz2/;
+						$img_cmd_full =~ s/air-counter/bunzip2 \| air-counter/;
+					} else {
+						$img_cmd_full =~ s/$dest_data/$dest_data\.gz/;
+						$img_cmd_full =~ s/air-counter/gunzip \| air-counter/;
+					}
+				}
+			}
+		}
+	}
+
+	print ALOGW "\nCommand-line: $img_cmd_full\n";
+	
+	#**********************************
+	# Fork and exec
+	#**********************************
+	if ($pid = fork) {
+		# parent
+		$running_verify = 1;
+		$SIG{CHLD} = \&reaper;
+	} else {
+		die "cannot fork: $!" unless defined $pid;
+		# child
+		exec "$img_cmd_full" or die "Error executing verify command: $!\n";
+	}
+}
+
+
+#*****************************************************************************
+# Sub to reap zombied child processes
+#*****************************************************************************
+sub reaper {
+	while (( my $child = waitpid(-1, WNOHANG)) > 0) {
+		warn "Cleaned up child process with PID $child\n";
+		if ($child == $pid) {
+			my $ret_val = $? >> 8;
+			warn "Main child process ($pid) has exited (status = $ret_val) and been reaped.\n";
+
+			if ( (($verify eq "Yes") && ($running_verify == 1)) || ($verify eq "No") ) {
+				$start_btn->configure(-state => 'normal');
+				$stop_btn->configure(-state => 'disable');
+				$menu_File->entryconfigure("Start",-state => 'normal');
+				$menu_File->entryconfigure("Stop",-state => 'disable');
+				$info = "Enter values and click 'Start' to begin";
+				$running_verify = 0;
+				sleep 3; # give the child processes a chance to write their final
+					 # output before we write "Command completed".
+				if ($verify eq "Yes") {
+					# extract hash value from dd/md5sum/sha1sum and dc3dd md5/sha1 outputs
+					if ($ddtype eq "dc3dd") {
+						# Get verification hash
+						$verify_hash = `cat /tmp/verify_hash.log | grep -i Total`;
+						chomp $verify_hash;
+						$verify_hash =~ s/Total: //;
+					} else {
+						# Get verification hash
+						$verify_hash = `cat /tmp/verify_hash.log`;
+						chomp $verify_hash;
+						$verify_hash =~ s/  -//;
+					}
+					print "verify_hash = $verify_hash\n";
+					if ($orig_hash eq $verify_hash) {
+						print ALOGW "\nVERIFY SUCCESSFUL: Hashes match\nOrig = $orig_hash\nCopy = $verify_hash\n\n";
+					} else {
+						print ALOGW "\nVERIFY FAILED: Hashes don't match\nOrig = $orig_hash\nCopy = $verify_hash\n\n";
+					}
+				} else {
+					if ($hash_type ne "None") {
+						# print hash value
+						$orig_hash = `cat /tmp/hash.log`;
+						chomp $orig_hash;
+						# extract hash value from dd/md5sum and dc3dd md5 outputs
+						$orig_hash =~ s/Total: //;
+						$orig_hash =~ s/  -//;
+						print "orig_hash = $orig_hash\n";
+						print ALOGW "\n$hash_type Hash: $orig_hash\n\n";
+					}
+				}
+				unless ($command_cancelled == 1) {
+					# reset "is_tape" and "is_net" variables
+					$source_is_tape = 0;
+					$dest_is_tape = 0;
+					$source_is_net = 0;
+					$dest_is_net = 0;
+
+					my $cur_date = `date`;
+					chomp $cur_date;
+					print ALOGW "Command completed: $cur_date\n\n";
+					print ACDW "Command completed: $cur_date\n\n";
+				}
+
+			} else {
+				sleep 3; # give the child processes a chance to write their final
+					 # output before we write "Command completed".
+				unless ($command_cancelled == 1) {
+					# *TEST* don't reset "is_tape" variables here (right before
+					# a VERIFY operation which might include a tape device)
+					#$source_is_tape = 0;
+					#$dest_is_tape = 0;
+					# Get original hash
+					my $cur_date = `date`;
+					chomp $cur_date;
+					print ALOGW "Command completed: $cur_date\n\n";
+					print ACDW "Command completed: $cur_date\n\n";
+				}
+				unless ($command_cancelled == 1) {
+					\&verify();
+				}
+			}
+							
+		}
+	}
+}
+
+
+#*****************************************************************************
+# Exit subroutine
+#*****************************************************************************
+sub exit_air {
+	\&write_rc();
+	system "kill `cat /tmp/tailer.*`";
+	system "rm -f /tmp/tailer.*";
+	system "rm -f /tmp/*hash*.log";
+	close(ACD);
+	print "ACD closed\n";
+	close(ACDW);
+	print "ACDW closed\n";
+	close(ALOG);
+	print "ALOG closed\n";
+	close(ALOGW);
+	print "ALOGW closed\n";
+	exit;
+}
+
+#*****************************************************************************
+# Save settings in an rc file in user's home dir
+#*****************************************************************************
+sub write_rc {
+	print "writing $rc_file\n";
+	open(RC, "> $rc_file") or warn "$rc_file couldn't be opened for writing: $!\n";
+	print RC "source:$source\n";
+	print RC "dest:$dest\n";
+	print RC "source_lblk:$source_lblk\n";
+	print RC "dest_lblk:$dest_lblk\n";
+	print RC "comp_type:$comp_type\n";
+	print RC "hash_type:$hash_type\n";
+	print RC "hash_type2:$hash_type2\n";
+	print RC "bitmap_dir:$bitmap_dir\n";
+	print RC "air_log_dir:$air_log_dir\n";
+	print RC "verify:$verify\n";
+	print RC "ddtype:$ddtype\n";
+	print RC "nctype:$nctype\n";
+	print RC "split_size:$split_size\n";
+	print RC "crypt_key:$crypt_key\n";
+	print RC "conv_opts:$conv_opts\n";
+	print RC "iflag_opts:$iflag_opts\n";
+	close(RC);
+}
+
+#*****************************************************************************
+# Stop/cancel processes that have been forked off
+#*****************************************************************************
+sub dd_stop {
+	my $stop_dlg = $mw->Dialog(-title => "Stop / Cancel",
+                -text => "Are you sure you want to STOP/CANCEL the current operation?",
+                -default_button => 'No',
+                -buttons => [qw/Yes No/],
+                -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*');
+        my $dlgans = $stop_dlg->Show;
+        if ($dlgans =~ /No/) {
+                return;
+        }
+	$command_cancelled = 1;  # prevents printing "command completed"
+				 # in the reaper sub...
+	$start_btn->configure(-state => 'normal');
+	$stop_btn->configure(-state => 'disabled');
+	$menu_File->entryconfigure("Start", -state => 'normal');
+	$menu_File->entryconfigure("Stop", -state => 'disabled');
+	$info = "Enter values and click 'Start' to begin";
+
+	system "killall $ddtype"; # no need to kill air-counter...it will die 
+	if (($source_is_net == 1) || ($dest_is_net == 1)) {
+		system "killall $nctype";
+	}
+
+	# reset "is_tape" and "is_net" variables
+	$source_is_tape = 0;
+	$dest_is_tape = 0;
+	$source_is_net = 0;
+	$dest_is_net = 0;
+
+	sleep 3; # give the child processes a chance to write their final
+		 # output before we write "Command CANCELLED".
+	my $cur_date = `date`;
+	chomp $cur_date;
+	print ALOGW "Command CANCELLED: $cur_date\n\n";
+	print ACDW "Command CANCELLED: $cur_date\n\n";
+}
+#=============================================================================
+sub tape_status_check {
+	# check to make sure the tape drive isn't empty
+	$tape_drive_empty = 0;
+	my $tape_status = `mt -f $_[0] status`;
+	#print $tape_status;
+	if ($tape_status =~ /DR_OPEN/) {
+		print ALOGW "Tape drive $_[0] is empty!\n";
+		$mw->update();	
+		$tape_drive_empty = 1;
+	}
+}
+#*****************************************************************************
+sub rewind_tape_dlg {
+	\&tape_status_check($_[0]);
+	if ($tape_drive_empty == 1) {
+		return;
+	}
+	my $info_orig = $info;
+	$info = "Rewinding tape $_[0]...";
+	print "rewinding tape $_[0]...\n";
+	print ALOGW "Rewinding tape $_[0]...\n";
+	$mw->update();
+	system "mt -f $_[0] rewind";
+        my $ret_val = $? >> 8;
+        if ($ret_val > 0) {
+        	warn "rewinding $_[0] failed: $!\n";
+		print ALOGW "Rewind of $_[0] failed: $!\n";	
+        } else {
+		print "rewind of $_[0] completed.\n";
+		print ALOGW "Rewind of $_[0] completed.\n\n";
+	}
+	$info = $info_orig;
+	$mw->update();
+	\&tape_status_dlg($_[0]);
+}
+
+#*****************************************************************************
+sub rewind_tape {
+	if (($source_is_tape == 1) && ($dest_is_tape == 1)) {
+		\&tape_status_check($source);
+		if ($tape_drive_empty == 1) {
+			return;
+		}
+		\&tape_status_check($dest);
+		if ($tape_drive_empty == 1) {
+			return;
+		}
+		my $info_orig = $info;
+		$info = "Rewinding tapes $source...";
+		print "rewinding tape $source...\n";
+		print ALOGW "Rewinding tape $source...\n";
+		$mw->update();
+		$lw->update();
+		system "mt -f $source rewind";
+		my $ret_val = $? >> 8;
+		if ($ret_val > 0) {
+			warn "rewinding $source failed: $!\n";
+			print ALOGW "Rewind of $source failed: $!\n";
+		} else {
+			print "rewind of $source completed.\n";
+			print ALOGW "Rewind of $source completed.\n\n";
+		}
+		$info = "Rewinding tapes $dest...";
+                print "rewinding tape $dest...\n";
+		print ALOGW "Rewinding tape $dest...\n";
+                $mw->update();
+                system "mt -f $dest rewind";
+                $ret_val = $? >> 8;
+                if ($ret_val > 0) {
+                        warn "rewinding $dest failed: $!\n";
+			print ALOGW "Rewind of $dest failed: $!\n";	
+                } else {
+			print "rewind of $dest completed.\n";
+			print ALOGW "Rewind of $dest completed.\n\n";
+		}
+		$info = $info_orig;
+		$mw->update();
+		\&tape_status();
+	} 
+	if (($source_is_tape == 0) && ($dest_is_tape == 1)) {
+		\&tape_status_check($dest);
+		if ($tape_drive_empty == 1) {
+			return;
+		}
+		my $info_orig = $info;
+		$info = "Rewinding tape $dest...";
+                print "rewinding tape $dest...\n";
+		print ALOGW "Rewinding tape $dest...\n";
+		$mw->update();
+		system "mt -f $dest rewind";
+		my $ret_val = $? >> 8;
+               	if ($ret_val > 0) {
+               	        warn "rewinding $dest failed: $!\n";
+			print ALOGW "Rewind of $dest failed: $!\n";	
+                } else {
+			print "rewind of $dest completed.\n";
+			print ALOGW "Rewind of $dest completed.\n\n";
+               	}
+		$info = $info_orig;
+		$mw->update();
+		\&tape_status();
+	}
+	if (($source_is_tape == 1) && ($dest_is_tape == 0)) {
+		\&tape_status_check($source);
+		if ($tape_drive_empty == 1) {
+			return;
+		}
+		my $info_orig = $info;
+                $info = "Rewinding tape $source...";
+		print "rewinding tape $source...\n";
+		print ALOGW "Rewinding tape $source...\n";
+                $mw->update();
+                system "mt -f $source rewind";
+                my $ret_val = $? >> 8;
+                if ($ret_val > 0) {
+                         warn "rewinding $source failed: $!\n";
+			print ALOGW "Rewind of $source failed: $!\n";
+		} else {
+			print "rewind of $source completed.\n";
+			print ALOGW "Rewind of $source completed.\n\n";
+                }
+                $info = $info_orig;
+                $mw->update();
+                \&tape_status();
+        }
+}
+
+#*****************************************************************************
+sub tape_status_dlg {
+	print ALOGW "Tape status ($_[0])\n";
+	my $tpstat = `mt -f $_[0] status`;
+	print ALOGW "$tpstat";
+	print "$tpstat";
+}
+
+
+#*****************************************************************************
+sub tape_status {
+	if (($source_is_tape == 1) && ($dest_is_tape == 0)) {
+		print ALOGW "SOURCE Tape status:\n";
+		my $tpstat = `mt -f $source status`;
+		print ALOGW "$tpstat";
+		print "$tpstat";
+		print ALOGW "\n";
+	}
+	if (($dest_is_tape == 1) && ($source_is_tape == 0)) {
+		print ALOGW "DEST Tape status:\n";
+		my $tpstat = `mt -f $dest status`;
+		print ALOGW "$tpstat";
+		print "$tpstat";
+		print ALOGW "\n";
+	}
+	if (($dest_is_tape == 1) && ($source_is_tape == 1)) {
+                print ALOGW "SOURCE Tape status:\n";
+		my $tpstat = `mt -f $source status`;
+		print ALOGW "$tpstat";
+		print "$tpstat";
+		print ALOGW "\n";
+		print ALOGW "DEST Tape status:\n";
+		my $tpstat = `mt -f $dest status`;
+		print ALOGW "$tpstat";
+		print "$tpstat";
+		print ALOGW "\n";
+        }
+}
+
+#*****************************************************************************
+sub hdparm {
+	print "doing hdparm on $_[0]\n";
+	if ($_[0] =~ /hd/) {
+		system "hdparm -i $_[0] >> $air_log 2>&1";
+	} else {
+		system "hdparm $_[0] >> $air_log 2>&1";
+	}
+}
+
+#*****************************************************************************
+sub mt_other {
+	print "doing mt -f $_[0] $mt_arg1 $mt_arg2\n";
+	system "mt -f $_[0] $mt_arg1 $mt_arg2 >> $air_log 2>&1";
+	system "mt -f $_[0] status >> $air_log 2>&1";
+}
+
+#*****************************************************************************
+sub fdisk {
+	print "doing 'sfdisk -l -uM' on $_[0]\n";
+	system "sfdisk -l -uM $_[0] >> $air_log 2>&1";
+}
+
+#*****************************************************************************
+sub device_action {
+	my $device_dialog;
+	my $user_sel;
+	$device_name = $_[0];
+	my $bitmap_file = "/$bitmap_dir/" . $device_name . ".xbm";
+	my $cur_device = "/dev/" . $device_name;
+
+	if ($device_name =~ /st/) {
+		$device_dialog = $mw->Dialog(
+			-title => "Drive Action $cur_device", 
+			-bitmap => "\@$bitmap_file", 
+			-text => "Select action for Tape device $cur_device:", 
+			-buttons => ['Status', 'Rewind', 'Set as Source', 'Set as Dest', 'Other', 'Cancel'], 
+			-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+		);
+	}
+
+	if ($device_name =~ /zero/) {
+		$device_dialog = $mw->Dialog(
+			-title => "Device Action /dev/zero", 
+			-text => "/dev/zero can be used for wiping media if set as the data source:", 
+			-buttons => ['Set as Source', 'Cancel'],
+			-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*'
+		);
+	}
+
+	if ($device_name =~ /null/) {
+		$device_dialog = $mw->Dialog(
+			-title => "Device Action /dev/null", 
+			-text => "/dev/null can be used as a \"black hole\" for data when it is set as the destination:", 
+			-buttons => ['Set as Destination', 'Cancel'], 
+			-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+		);
+	}
+
+	if ($device_name eq "net") {
+		if (($no_nc == 1) && ($no_cryptcat == 1)) {
+			&no_network_dialog();
+			return;
+		}
+		if (($no_nc == 1) && ($no_cryptcat != 1)) {
+			&only_cryptcat_dialog();
+		}
+		if (($no_nc != 1) && ($no_cryptcat == 1)) {
+			&no_cryptcat_dialog();
+		}
+		$device_dialog = $mw->Dialog(
+			-title => "Remote Computer is...",
+			-text => "Is the Remote computer the Source or Destination?",
+			-buttons => ['Source', 'Destination', 'Cancel'],
+			-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+		);
+
+	}
+
+	if ($device_name =~ /hd|sd|scd/) {	
+		$device_dialog = $mw->Dialog(
+			-title => "Drive Action $cur_device", 
+			-text => "Select action for device $cur_device:", 
+			-buttons => ['Drive Info', 'Partitions', 'Set as Source', 'Set as Dest', 'Cancel'], 
+			-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+		);
+	}
+
+	$user_sel = $device_dialog->Show(-global);
+	if ($user_sel =~ /Status/) {
+		\&tape_status_dlg($cur_device);
+	}
+	if ($user_sel =~ /Rewind/) {
+		\&rewind_tape_dlg($cur_device);
+	}		
+	if ($user_sel eq "Cancel") { 
+		return;
+	}
+	if ($user_sel =~ /Source/) {
+		unless ($device_name eq "net") {
+			$source_entry->delete(0,'end');
+			$source_entry->insert(0,$cur_device);
+		} else {
+			my $dn = $mw->DialogBox(
+				-title => 'Listen Port',
+				-buttons => ['Ok', 'Cancel'],
+				-default_button => 'Ok',
+			);
+			$dn->add('LabEntry', 
+				-textvariable => \$source_port,
+				-width => 10,
+				-label => 'Listen Port',
+				-labelPack => [-side => 'left']
+			)->pack;
+			my $dn_answer = $dn->Show();
+
+			if ($dn_answer eq "Ok") {
+				$source_entry->delete(0,'end');
+				$source_entry->insert(0,"port:$source_port");
+				my $dlisten = $mw->Dialog(
+					-title => 'Listen',
+					-text => "You must now click the 'Start' button for AIR to begin listening on port $source_port.",
+					-buttons => ['Ok'],
+					-font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+				);
+				$dlisten->Show();
+					
+			}
+		}
+	}
+	if ($user_sel =~ /Dest/) {
+		unless ($device_name eq "net") {
+			$dest_entry->delete(0,'end');
+			$dest_entry->insert(0,$cur_device);
+		} else {
+			my $dn = $mw->DialogBox(
+				-title => 'Remote IP & Port',
+				-buttons => ['Ok', 'Cancel'],
+				-default_button => 'Ok',
+			);
+			$dn->add('LabEntry', 
+				-textvariable => \$dest_ip,
+				-width => 16,
+				-label => 'Dest IP',
+				-labelPack => [-side => 'left']
+			)->pack;
+			$dn->add('LabEntry', 
+				-textvariable => \$dest_port,
+				-width => 10,
+				-label => 'Dest Port',
+				-labelPack => [-side => 'left']
+			)->pack;
+			my $dn_answer = $dn->Show();
+
+			if ($dn_answer eq "Ok") {
+				$split = 0;
+				$split_btn->configure(-state => 'disabled',);
+				$split_lbl->configure(-state => 'disabled',);
+				$split_lbl2->configure(-state => 'disabled',);
+				$split_size_entry->configure(-state => 'disabled',);
+				$dest_entry->delete(0,'end');
+				$dest_entry->insert(0,"ip:$dest_ip port:$dest_port");
+				my $dsend = $mw->Dialog(
+                                        -title => 'Send',
+                                        -text => "You must now click the 'Start' button for AIR to begin sending data to $dest_ip:$dest_port.",
+                                        -buttons => ['Ok'],
+                                        -font => '-*-Arial-Bold-R-Normal--*-140-*-*-*-*-*-*',
+                                );
+                                $dsend->Show();
+			}
+		}
+	}
+	if ($user_sel eq "Drive Info") { 
+		\&hdparm($cur_device);
+	}
+	if ($user_sel eq "Partitions") { 
+		\&fdisk($cur_device);
+	}
+	if ($user_sel eq "Other") {
+		my $mtdlg = $mw->DialogBox(
+			-title => 'Other mt command',
+			-buttons => ['Ok', 'Cancel'],
+			-default_button => 'Ok',
+		);
+		$mtdlg->add('Label',
+			-text => "mt -f $cur_device",
+		)->pack;
+		$mtdlg->add('LabEntry',
+			-textvariable => \$mt_arg1,
+			-width => 16,
+			-label => 'Arg 1:',
+			-labelPack => [-side => 'left']
+		)->pack;
+		$mtdlg->add('LabEntry',
+			-textvariable => \$mt_arg2,
+			-width => 16,
+			-label => 'Arg 2:',
+			-labelPack => [-side => 'left']
+		)->pack;
+		my $mtdlg_answer = $mtdlg->Show();
+		
+		if ($mtdlg_answer eq "Ok") {
+			\&mt_other($cur_device)
+		}
+	}		
+}
