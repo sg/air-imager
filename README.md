@@ -1,12 +1,11 @@
 # air-imager
 Legacy graphical forensic imager written in Perl/Tk
 
-
+<pre>
 --------------------------------------------------------------------------
               AIR - Automated Image & Restore v2.0.0
                            January, 2010
 --------------------------------------------------------------------------
-
 ********  WARNING !!! USE THIS SOFTWARE AT YOUR OWN RISK!!! **************
 I've tested and used the software and it works for me, but there is no
 guarantee that it will work for you.  You can very easily DESTROY DATA
@@ -25,6 +24,7 @@ FROM THE USE OF THIS SOFTWARE WHETHER THEY ARE THE RESULT OF PROGRAM BUGS,
 USER ERROR, HARDWARE FAILURES, OR ACTS OF GOD.  AGAIN, IF YOU USE THIS
 SOFTWARE YOU DO SO AT YOUR OWN RISK AND ASSUME ALL RESPONSIBILITY FOR THE
 RESULTS.
+
 ***************************************************************************
 
 AIR is a graphical front-end for dd and dc3dd designed to make the task
@@ -119,3 +119,4 @@ Report problems, bugs, suggestions, comments, code improvements to:
   Steve Gibson
   steve@stevegibson.com
   http://air-imager.sourceforge.net
+</pre>
